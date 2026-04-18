@@ -5,9 +5,55 @@ from datetime import datetime, timedelta
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
+
+def _build_credentials_from_env(token_data: dict) -> Credentials:
+    # Formato esperado pelo from_authorized_user_info.
+    token = token_data.get('token') or token_data.get('access_token')
+    client_id = token_data.get('client_id') or os.environ.get('GMAIL_CLIENT_ID')
+    client_secret = token_data.get('client_secret') or os.environ.get('GMAIL_CLIENT_SECRET')
+    refresh_token = token_data.get('refresh_token') or os.environ.get('GMAIL_REFRESH_TOKEN')
+
+    if token and client_id and client_secret and refresh_token:
+        normalized = {
+            'token': token,
+            'client_id': client_id,
+            'client_secret': client_secret,
+            'refresh_token': refresh_token,
+            'token_uri': token_data.get('token_uri', 'https://oauth2.googleapis.com/token'),
+            'scopes': token_data.get('scopes', SCOPES),
+        }
+        return Credentials.from_authorized_user_info(normalized, SCOPES)
+
+    # Fallback: permite execução com access token temporário sem refresh.
+    if token:
+        return Credentials(token=token, scopes=SCOPES)
+
+    raise ValueError(
+        "GMAIL_TOKEN inválido: informe JSON com ao menos 'token' ou 'access_token'. "
+        "Para uso estável no Actions, inclua também client_id, client_secret e refresh_token "
+        "(no GMAIL_TOKEN ou em secrets separados GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN)."
+    )
+
 def get_service():
-    token_data = json.loads(os.environ['GMAIL_TOKEN'])
-    creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+    """Carrega credenciais do ambiente (GMAIL_TOKEN) e retorna o serviço Gmail."""
+    token_json_str = os.environ.get('GMAIL_TOKEN')
+    
+    if not token_json_str:
+        raise ValueError(
+            "Variável de ambiente GMAIL_TOKEN não configurada.\n"
+            "Execute: python auth_interactive.py\n"
+            "E copie o JSON resultante para GitHub Secrets"
+        )
+
+    try:
+        token_data = json.loads(token_json_str)
+    except json.JSONDecodeError as exc:
+        raise ValueError("GMAIL_TOKEN não está em JSON válido.") from exc
+
+    if not isinstance(token_data, dict):
+        raise ValueError("GMAIL_TOKEN deve ser um objeto JSON.")
+
+    creds = _build_credentials_from_env(token_data)
     return build('gmail', 'v1', credentials=creds)
 
 def get_emails_since_yesterday():
