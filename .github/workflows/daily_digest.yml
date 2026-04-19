@@ -2,7 +2,7 @@ name: Email Digest Diário
 
 on:
   schedule:
-    - cron: '0 */3 * * *'   # A cada 3 horas (00h, 03h, 06h, 09h, 12h, 15h, 18h, 21h UTC)
+    - cron: '0 */6 * * *'   # A cada 3 horas (00h, 03h, 06h, 09h, 12h, 15h, 18h, 21h UTC)
   workflow_dispatch:        # Permite rodar manualmente também
 
 jobs:
