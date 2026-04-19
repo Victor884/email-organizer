@@ -1,10 +1,12 @@
 import os
+import json
 from groq import Groq
 
 CATEGORIES = {
     'vagas':       ['vaga', 'emprego', 'oportunidade', 'contratação', 'hiring', 'job',
                     'linkedin', 'recrutador', 'recruiter', 'processo seletivo', 'candidatura',
-                    'entrevista', 'interview', 'posição', 'position', 'oferta'],
+                    'entrevista', 'interview', 'posição', 'position', 'oferta', 'estamos buscando',
+                    'looking for', 'we are hiring', 'join our team', 'faça parte'],
     'treinamento': ['treinamento', 'curso', 'certificação', 'capacitação', 'training',
                     'udemy', 'coursera', 'alura', 'dio', 'bootcamp', 'mentoria'],
     'workshops':   ['workshop', 'webinar', 'evento', 'meetup', 'hackathon', 'palestra', 'summit'],
@@ -14,13 +16,21 @@ CATEGORIES = {
 }
 
 MEU_PERFIL = {
-    'cargos': ['analista de dados', 'engenheiro de dados', 'data analyst', 'data engineer',
-               'analista de bi', 'bi analyst', 'business intelligence', 'analytics engineer',
-               'analytics', 'dados', 'data'],
-    'senioridades': ['pleno', 'sênior', 'senior', 'sr.', 'sr ', 'pl.', 'pl ', 'mid-level', 'mid level'],
-    'techs': ['python', 'sql', 'spark', 'dbt', 'airflow', 'power bi', 'tableau', 'looker',
-              'bigquery', 'redshift', 'snowflake', 'databricks', 'aws', 'gcp', 'azure',
-              'pandas', 'pyspark', 'kafka', 'datalake', 'data warehouse', 'etl', 'elt']
+    'cargos': [
+        'analista de dados', 'engenheiro de dados', 'data analyst', 'data engineer',
+        'analista de bi', 'bi analyst', 'business intelligence', 'analytics engineer',
+        'analytics', 'dados', 'data'
+    ],
+    'senioridades': [
+        'pleno', 'sênior', 'senior', 'sr.', 'sr ', 'pl.', 'pl ',
+        'mid-level', 'mid level', 'ii', 'iii'
+    ],
+    'techs': [
+        'python', 'sql', 'spark', 'dbt', 'airflow', 'power bi', 'tableau', 'looker',
+        'bigquery', 'redshift', 'snowflake', 'databricks', 'aws', 'gcp', 'azure',
+        'pandas', 'pyspark', 'kafka', 'datalake', 'data warehouse', 'etl', 'elt',
+        'metabase', 'superset', 'data studio', 'excel', 'google sheets'
+    ]
 }
 
 client = Groq(api_key=os.environ['GROQ_API_KEY'])
@@ -32,10 +42,12 @@ def classify_email(subject: str, snippet: str) -> str:
     for category, keywords in CATEGORIES.items():
         if any(kw in text for kw in keywords):
             return category
+
     prompt = f"""Classifique este email em UMA das categorias: vagas, treinamento, workshops, newsletters, financeiro, outros.
 Assunto: {subject}
 Trecho: {snippet}
 Responda APENAS com o nome da categoria, sem mais nada."""
+
     resp = client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -45,72 +57,88 @@ Responda APENAS com o nome da categoria, sem mais nada."""
     return (resp.choices[0].message.content or 'outros').strip().lower()
 
 
-def _perfil_match_rapido(subject: str, snippet: str) -> bool:
-    """Verifica rapidamente se o email tem chance de ser relevante para o perfil."""
-    text = f"{subject} {snippet}".lower()
-    tem_cargo = any(c in text for c in MEU_PERFIL['cargos'])
-    tem_senioridade = any(s in text for s in MEU_PERFIL['senioridades'])
-    # Relevante se mencionar cargo E (senioridade OU tech conhecida)
-    tem_tech = any(t in text for t in MEU_PERFIL['techs'])
-    return tem_cargo or (tem_tech and ('vaga' in text or 'job' in text or 'oportunidade' in text))
-
-
 def analisar_vaga(email: dict) -> dict:
-    """
-    Usa Groq para extrair informações estruturadas de um email de vaga.
-    Retorna dict com análise completa.
-    """
     subject = email.get('subject', '')
     snippet = email.get('snippet', '')
-    body    = email.get('body', '')[:1500]  # limite para não estourar tokens
+    body    = email.get('body', '')[:2000]
 
-    prompt = f"""Você é um assistente que analisa emails de recrutamento para um profissional de dados.
+    prompt = f"""Você analisa emails de recrutamento para um profissional de dados.
 
 PERFIL DO CANDIDATO:
 - Cargos desejados: Analista de Dados, Engenheiro de Dados, Analista de BI
-- Senioridade: Pleno ou Sênior
-- Tecnologias: Python, SQL, Spark, dbt, Airflow, Power BI, Tableau, BigQuery, Redshift, Snowflake, Databricks, AWS, GCP, Azure
+- Senioridade buscada: Pleno ou Sênior
+- Tecnologias dominadas: Python, SQL, Spark, dbt, Airflow, Power BI, Tableau, Looker,
+  BigQuery, Redshift, Snowflake, Databricks, AWS, GCP, Azure, Pandas, PySpark, Kafka
 
 EMAIL:
 Assunto: {subject}
 Trecho: {snippet}
 Corpo: {body}
 
-Responda EXATAMENTE neste formato JSON (sem markdown, sem explicação, só o JSON):
+DEFINICOES DE STATUS:
+- "vaga_potencial": email com listagem de vagas abertas (newsletters de emprego, LinkedIn Jobs,
+  Gupy digest, Catho, InfoJobs) onde o candidato AINDA NAO se inscreveu. Pode conter varias vagas.
+- "nova_vaga": recrutador entrou em contato diretamente sobre UMA vaga especifica ja direcionada ao candidato.
+- "entrevista_agendada": confirmacao ou convite para entrevista.
+- "avanco_etapa": aprovacao para proxima fase do processo.
+- "proposta": oferta formal de emprego.
+- "aguardando": candidato esta em processo mas sem novidades.
+- "reprovado": candidato foi reprovado.
+- "outro": email de recrutamento que nao se encaixa nos anteriores.
+
+Responda EXATAMENTE neste JSON sem markdown e sem texto extra:
 {{
-  "cargo": "nome do cargo ou null",
-  "empresa": "nome da empresa ou null",
+  "cargo": "cargo principal ou null",
+  "empresa": "empresa ou null",
   "senioridade": "junior/pleno/senior/nao_informado",
   "modalidade": "remoto/hibrido/presencial/nao_informado",
   "local": "cidade/estado ou null",
-  "salario": "faixa salarial mencionada ou null",
-  "techs_match": ["lista de tecnologias do meu perfil que a vaga menciona"],
-  "status": "nova_vaga/entrevista_agendada/avanco_etapa/reprovado/proposta/aguardando/outro",
-  "resumo": "resumo em 1-2 frases do que se trata o email",
+  "salario": "faixa salarial ou null",
+  "techs_match": ["tecnologias do perfil mencionadas"],
+  "status": "nova_vaga/vaga_potencial/entrevista_agendada/avanco_etapa/reprovado/proposta/aguardando/outro",
+  "vagas_potenciais": [
+    {{
+      "cargo": "nome do cargo",
+      "empresa": "empresa ou null",
+      "senioridade": "pleno/senior/junior/nao_informado",
+      "modalidade": "remoto/hibrido/presencial/nao_informado",
+      "local": "cidade ou null",
+      "salario": "faixa ou null",
+      "techs_match": ["techs que batem com o perfil"],
+      "relevante": true,
+      "link": "URL direta para a vaga ou null"
+    }}
+  ],
+  "resumo": "resumo em 1-2 frases do email",
   "relevante_para_perfil": true/false,
   "motivo_irrelevante": "motivo se nao relevante, senao null"
-}}"""
+}}
+
+Preencha "vagas_potenciais" SOMENTE quando status for "vaga_potencial", listando cada vaga encontrada.
+Marque "relevante" como true apenas para cargos Analista/Engenheiro de Dados ou BI Pleno/Senior.
+Se nao houver vagas potenciais use lista vazia []."""
 
     try:
         resp = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=400,
+            max_tokens=1000,
             temperature=0
         )
-        import json
-        content = resp.choices[0].message.content or '{}'
-        # Remove possível markdown
-        content = content.strip().removeprefix('```json').removeprefix('```').removesuffix('```').strip()
+        content = (resp.choices[0].message.content or '{}').strip()
+        content = content.removeprefix('```json').removeprefix('```').removesuffix('```').strip()
         analise = json.loads(content)
+        if 'vagas_potenciais' not in analise:
+            analise['vagas_potenciais'] = []
     except Exception as e:
         analise = {
             "cargo": None, "empresa": None, "senioridade": "nao_informado",
             "modalidade": "nao_informado", "local": None, "salario": None,
             "techs_match": [], "status": "outro",
+            "vagas_potenciais": [],
             "resumo": snippet[:120],
             "relevante_para_perfil": False,
-            "motivo_irrelevante": f"Erro na análise: {e}"
+            "motivo_irrelevante": f"Erro na analise: {e}"
         }
 
     return analise
@@ -123,26 +151,23 @@ def classify_all(emails: list) -> dict:
         cat = classify_email(email['subject'], email['snippet'])
         if cat not in result:
             cat = 'outros'
-
-        # Análise profunda apenas para vagas
         if cat == 'vagas':
             email['analise'] = analisar_vaga(email)
-        
         result[cat].append(email)
 
-    # Ordena vagas: primeiro as relevantes para o perfil, depois por status
     STATUS_ORDEM = {
         'entrevista_agendada': 0,
         'avanco_etapa':        1,
         'proposta':            2,
         'nova_vaga':           3,
-        'aguardando':          4,
-        'reprovado':           5,
-        'outro':               6,
+        'vaga_potencial':      4,
+        'aguardando':          5,
+        'reprovado':           6,
+        'outro':               7,
     }
     result['vagas'].sort(key=lambda e: (
         0 if e.get('analise', {}).get('relevante_para_perfil') else 1,
-        STATUS_ORDEM.get(e.get('analise', {}).get('status', 'outro'), 6)
+        STATUS_ORDEM.get(e.get('analise', {}).get('status', 'outro'), 7)
     ))
 
     return result
