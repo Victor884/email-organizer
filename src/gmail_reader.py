@@ -66,7 +66,7 @@ def get_emails_since_yesterday():
     emails = []
     for msg in result.get('messages', [])[:50]:  # max 50
         data = service.users().messages().get(
-            userId='me', messageId=msg['id'], format='full'
+            userId='me', id=msg['id'], format='full'
         ).execute()
         
         headers = {h['name']: h['value'] for h in data['payload']['headers']}
