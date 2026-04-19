@@ -11,6 +11,7 @@ CATEGORIES = {
 }
 
 client = Groq(api_key=os.environ['GROQ_API_KEY'])
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.1-8b-instant')
 
 def classify_email(subject: str, snippet: str) -> str:
     text = f"{subject} {snippet}".lower()
@@ -27,7 +28,7 @@ Trecho: {snippet}
 Responda APENAS com o nome da categoria, nada mais."""
 
     resp = client.chat.completions.create(
-        model="llama3-8b-8192",
+        model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
         max_tokens=10,
         temperature=0
