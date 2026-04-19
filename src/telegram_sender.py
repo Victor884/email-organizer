@@ -57,6 +57,7 @@ def _formatar_vaga_processo(email: dict) -> str:
     seniori = SENIORIDADE_LABEL.get(a.get('senioridade', ''), '')
     techs   = a.get('techs_match', [])
     resumo  = a.get('resumo', email.get('snippet', '')[:120])
+    link    = a.get('link')
 
     linhas = [label]
     linhas.append(f"*{cargo}*" + (f" — {seniori}" if seniori else ""))
@@ -69,6 +70,8 @@ def _formatar_vaga_processo(email: dict) -> str:
         linhas.append(f"🛠️ {', '.join(techs[:5])}")
     if resumo:
         linhas.append(f"_{resumo}_")
+    if link:
+        linhas.append(f"🔗 [Candidatar-se]({link})")
     return '\n'.join(linhas)
 
 

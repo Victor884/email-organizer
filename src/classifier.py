@@ -86,6 +86,12 @@ DEFINICOES DE STATUS:
 - "reprovado": candidato foi reprovado.
 - "outro": email de recrutamento que nao se encaixa nos anteriores.
 
+INSTRUCOES IMPORTANTES:
+- Sempre busque e extraia URLs/links diretos para candidatar-se ou acessar a vaga
+- Procure por links HTTP(S), URLs encurtadas (bit.ly, tinyurl, etc) e links em markdown [texto](url)
+- Para vagas_potenciais de newsletters, extraia a URL/link de cada vaga individual listada
+- Se nao encontrar link direto, coloque null
+
 Responda EXATAMENTE neste JSON sem markdown e sem texto extra:
 {{
   "cargo": "cargo principal ou null",
@@ -95,6 +101,7 @@ Responda EXATAMENTE neste JSON sem markdown e sem texto extra:
   "local": "cidade/estado ou null",
   "salario": "faixa salarial ou null",
   "techs_match": ["tecnologias do perfil mencionadas"],
+  "link": "URL direta para a vaga ou null",
   "status": "nova_vaga/vaga_potencial/entrevista_agendada/avanco_etapa/reprovado/proposta/aguardando/outro",
   "vagas_potenciais": [
     {{
