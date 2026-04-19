@@ -1,6 +1,8 @@
 import os
 import json
+import re
 from groq import Groq
+from functools import lru_cache
 
 CATEGORIES = {
     'vagas':       ['vaga', 'emprego', 'oportunidade', 'contratação', 'hiring', 'job',
@@ -34,13 +36,22 @@ MEU_PERFIL = {
 }
 
 client = Groq(api_key=os.environ['GROQ_API_KEY'])
-GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.1-8b-instant')
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'gpt-4o-20b')  # Mudado para GPT OSS 20B (mais rápido)
+
+# Compilar patterns de keywords uma só vez (melhora performance)
+CATEGORY_PATTERNS = {}
+for category, keywords in CATEGORIES.items():
+    # Cria regex pattern para search mais eficiente
+    CATEGORY_PATTERNS[category] = re.compile(
+        '|'.join(re.escape(kw) for kw in keywords),
+        re.IGNORECASE
+    )
 
 
 def classify_email(subject: str, snippet: str) -> str:
-    text = f"{subject} {snippet}".lower()
-    for category, keywords in CATEGORIES.items():
-        if any(kw in text for kw in keywords):
+    text = f"{subject} {snippet}"
+    for category, pattern in CATEGORY_PATTERNS.items():
+        if pattern.search(text):  # Mais rápido que loop with 'any()'
             return category
 
     prompt = f"""Classifique este email em UMA das categorias: vagas, treinamento, workshops, newsletters, financeiro, outros.
@@ -137,15 +148,28 @@ Se nao houver vagas potenciais use lista vazia []."""
         analise = json.loads(content)
         if 'vagas_potenciais' not in analise:
             analise['vagas_potenciais'] = []
-    except Exception as e:
+    except json.JSONDecodeError as e:
+        # JSON inválido da IA - fallback básico
         analise = {
             "cargo": None, "empresa": None, "senioridade": "nao_informado",
             "modalidade": "nao_informado", "local": None, "salario": None,
-            "techs_match": [], "status": "outro",
+            "techs_match": [], "link": None, "status": "outro",
             "vagas_potenciais": [],
             "resumo": snippet[:120],
             "relevante_para_perfil": False,
-            "motivo_irrelevante": f"Erro na analise: {e}"
+            "motivo_irrelevante": f"JSON inválido da API"
+        }
+    except Exception as e:
+        # Outras falhas (timeout, rate limit, etc)
+        print(f"Erro na análise da vaga: {e}")
+        analise = {
+            "cargo": None, "empresa": None, "senioridade": "nao_informado",
+            "modalidade": "nao_informado", "local": None, "salario": None,
+            "techs_match": [], "link": None, "status": "outro",
+            "vagas_potenciais": [],
+            "resumo": snippet[:120],
+            "relevante_para_perfil": False,
+            "motivo_irrelevante": f"Erro de API: {type(e).__name__}"
         }
 
     return analise
