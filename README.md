@@ -203,7 +203,42 @@ email-organizer/
 - **Groq API** - Classificação com IA (Llama 3.1)
 - **python-telegram-bot** - Integração Telegram
 - **GitHub Actions** - Automação e CI/CD
+### Mapa de Dependências Entre Módulos
 
+```mermaid
+graph TB
+    Main["main.py<br/>🎯 Orquestrador"]
+    
+    Main -->|import| Reader["gmail_reader.py<br/>📧 Email Reader"]
+    Main -->|import| Classifier["classifier.py<br/>🤖 Classifier"]
+    Main -->|import| Sender["telegram_sender.py<br/>📱 Telegram Sender"]
+    
+    Reader -->|uses| GAuth["google.oauth2.credentials<br/>🔐 Google Auth"]
+    Reader -->|uses| GAPI["googleapiclient.discovery<br/>📧 Gmail API"]
+    
+    Classifier -->|uses| Groq["groq.Groq<br/>🧠 Groq Client"]
+    Classifier -->|uses| Re["re (regex)<br/>🔤 Pattern Matching"]
+    Classifier -->|uses| JSON["json<br/>📋 JSON Parse"]
+    
+    Sender -->|uses| TBot["telegram.bot<br/>💬 Telegram Client"]
+    Sender -->|uses| JSON
+    
+    Main -->|uses| OS["os<br/>🌍 Environment"]
+    Main -->|uses| JSON
+    Main -->|uses| DateTime["datetime<br/>⏰ Date/Time"]
+    Main -->|uses| HashLib["hashlib<br/>🔒 MD5 Hash"]
+    
+    style Main fill:#4CAF50,color:#fff,stroke:#2E7D32,stroke-width:3px
+    style Reader fill:#2196F3,color:#fff,stroke:#1565C0,stroke-width:2px
+    style Classifier fill:#FF9800,color:#fff,stroke:#E65100,stroke-width:2px
+    style Sender fill:#9C27B0,color:#fff,stroke:#6A1B9A,stroke-width:2px
+```
+
+**Legenda:**
+- 🟢 `main.py` - Orquestrador central (verde)
+- 🔵 `gmail_reader.py` - Leitor de emails (azul)
+- 🟠 `classifier.py` - Classificador com IA (laranja)
+- 🟣 `telegram_sender.py` - Enviador (roxo)
 ## � Arquitetura do Projeto
 
 ### Arquitetura em Camadas
