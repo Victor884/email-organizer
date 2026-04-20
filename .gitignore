@@ -1,0 +1,38 @@
+# Environment
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Credentials and tokens (never commit these!)
+token.json
+credentials.json
+*.pem
+*.key
+
+# Cache
+processed_emails.json
+.cache/
+*.cache
+
+# Environment variables
+.env
+.env.local
+.env.*.local
