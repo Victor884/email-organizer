@@ -204,7 +204,108 @@ email-organizer/
 - **python-telegram-bot** - Integração Telegram
 - **GitHub Actions** - Automação e CI/CD
 
-## 🛠️ Desenvolvimento
+## � Arquitetura do Projeto
+
+### Arquitetura em Camadas
+
+```
+┌─────────────────────────────────────────────────┐
+│           CAMADA DE APRESENTAÇÃO                │
+│         📱 Telegram (usuário final)             │
+└─────────────────────────────────────────────────┘
+                        ↑
+                        │ send_digest()
+                        ↓
+┌─────────────────────────────────────────────────┐
+│        CAMADA DE FORMATAÇÃO                     │
+│    telegram_sender.py (formata + envia)         │
+└─────────────────────────────────────────────────┘
+                        ↑
+                        │ classified[]
+                        ↓
+┌─────────────────────────────────────────────────┐
+│        CAMADA DE LÓGICA/NEGÓCIO                 │
+│   main.py (orquestra todo o fluxo)              │
+│   - Deduplicação                                │
+│   - Cache management                            │
+└─────────────────────────────────────────────────┘
+                        ↑
+                        │ emails_novos[]
+                        ↓
+┌─────────────────────────────────────────────────┐
+│        CAMADA DE ANÁLISE (IA)                   │
+│  classifier.py (categoriza + analisa)           │
+│   - Keywords matching                           │
+│   - Groq API calls                              │
+└─────────────────────────────────────────────────┘
+                        ↑
+                        │ emails[]
+                        ↓
+┌─────────────────────────────────────────────────┐
+│        CAMADA DE INTEGRAÇÃO                     │
+│  gmail_reader.py (acessa APIs externas)         │
+│   - Google OAuth2                               │
+│   - Gmail API v1                                │
+└─────────────────────────────────────────────────┘
+                        ↑
+                        │
+                        ↓
+┌─────────────────────────────────────────────────┐
+│        SERVIÇOS EXTERNOS                        │
+│   🔵 Gmail  |  🤖 Groq/Llama  |  📨 Telegram   │
+└─────────────────────────────────────────────────┘
+```
+
+### Fluxo de Dados
+
+Gmail → Email Reader → Main Orchestrator → Classifier → Groq IA → Telegram Sender → Seu Telegram
+
+**Cada etapa:**
+1. **Gmail Reader** - Conecta via OAuth2, filtra últimas 24h, extrai headers e body
+2. **Main Orchestrator** - Carrega cache, remove duplicatas (hash MD5), orquestra fluxo
+3. **Classifier** - Detecta categoria por keywords, chama Groq para análise detalhada
+4. **Telegram Sender** - Formata com Markdown e emojis, agrupa por categoria
+5. **Cache** - Atualizado com novos hashes, limpeza automática após 7 dias
+
+### Estrutura de Arquivos
+
+```
+email-organizer/
+├── .github/workflows/daily_digest.yml    # CI/CD a cada 6h
+├── src/
+│   ├── main.py                           # ⚙️ Orquestrador
+│   ├── gmail_reader.py                   # 📧 Gmail
+│   ├── classifier.py                     # 🤖 IA
+│   └── telegram_sender.py                # 📱 Notificações
+├── auth_interactive.py                   # Setup OAuth2
+└── processed_emails.json                 # Cache (gerado)
+```
+
+### Fluxo de Processamento de Email
+
+```
+Email recebido
+    ↓
+gmail_reader.py → Extrai subject, sender, body
+    ↓
+main.py → Verifica cache (é duplicata?)
+    ↓
+SIM: Ignora | NÃO: Continua
+    ↓
+classifier.py → Testa keywords (qual categoria?)
+    ↓
+classifier.py → Chama Groq com prompt da IA
+    ↓
+Groq retorna: categoria, status, relevância, cargo, empresa, techs
+    ↓
+telegram_sender.py → Formata e envia ao Telegram
+    ↓
+main.py → Salva hash no cache
+```
+
+Para mais detalhes técnicos, consulte [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
+
+## �🛠️ Desenvolvimento
 
 ### Adicionar nova categoria
 
