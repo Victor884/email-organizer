@@ -1,33 +1,47 @@
 """
 telegram_sender.py
 ─────────────────────────────────────────────────────────────────────────────
-Responsabilidade única: formatar o dict classificado e enviar ao Telegram.
-Não faz chamadas ao Groq. Não conhece a lógica de classificação.
+Responsabilidade única: formatar e enviar o digest ao Telegram.
 
-Hierarquia de mensagens enviadas:
-  Msg 1 → Cabeçalho + Ação Urgente (proposta / entrevista / avanço de etapa)
-  Msg 2 → Vagas diretas relevantes ao perfil
-  Msg 3 → Vagas potenciais para se inscrever (newsletters de emprego)
-  Msg 4 → Demais emails (treinamento, financeiro, etc.)
+Hierarquia das mensagens (ordem de envio):
+  Msg 1 → 🚨 Ação Urgente  (proposta / entrevista / avanço) — se houver
+  Msg 2 → ✅ Direct Match  (score ≥ threshold, vagas do perfil)
+  Msg 3 → 📡 Radar         (score < threshold, mas relacionadas)
+  Msg 4 → 📖 Conteúdo & Networking (treinamento, workshops, newsletters, outros)
+
+Indicadores visuais de match:
+  🟢 perfeito (≥80)  🔵 bom (≥60)  🟡 parcial (≥40)  🔴 fraco (<40)
 ─────────────────────────────────────────────────────────────────────────────
 """
+
+from __future__ import annotations
 
 import os
 from datetime import datetime
 
 import requests
 
-from classifier import EmailAnalise, VagaPotencial, STATUS_PRIORIDADE
+from classifier import (
+    EmailAnalise, VagaPotencial,
+    MATCH_THRESHOLD_PCT, STATUS_PRIORIDADE,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONSTANTES DE EXIBIÇÃO
 # ─────────────────────────────────────────────────────────────────────────────
 
+_MATCH_EMOJI: dict[str, str] = {
+    "perfeito": "🟢",
+    "bom":      "🔵",
+    "parcial":  "🟡",
+    "fraco":    "🔴",
+}
+
 _STATUS_HEADER: dict[str, str] = {
     "proposta":            "🏆 PROPOSTA RECEBIDA",
     "entrevista_agendada": "📅 ENTREVISTA AGENDADA",
     "avanco_etapa":        "🚀 AVANÇOU DE ETAPA",
-    "nova_vaga":           "💼 Nova vaga",
+    "nova_vaga":           "💼 Nova vaga direta",
     "vaga_potencial":      "📋 Digest de vagas",
     "aguardando":          "⏳ Aguardando retorno",
     "reprovado":           "❌ Reprovado",
@@ -41,10 +55,12 @@ _MODALIDADE: dict[str, str] = {
 }
 
 _SENIORIDADE: dict[str, str] = {
-    "junior": "Júnior",
-    "pleno":  "Pleno",
-    "senior": "Sênior",
+    "junior": "Jr",
+    "pleno":  "Pl",
+    "senior": "Sr",
 }
+
+_STATUS_URGENTES = {"proposta", "entrevista_agendada", "avanco_etapa"}
 
 _CAT_ICON: dict[str, str] = {
     "treinamento": "🎓",
@@ -54,23 +70,21 @@ _CAT_ICON: dict[str, str] = {
     "outros":      "📁",
 }
 
-# Status que exigem ação imediata do candidato
-_STATUS_URGENTES = {"proposta", "entrevista_agendada", "avanco_etapa"}
-
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  HELPERS DE FORMATAÇÃO
+#  HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _linha_info(analise_or_vaga: object) -> str:
-    """Monta linha compacta: modalidade · local · salário."""
-    modal   = getattr(analise_or_vaga, "modalidade", "nao_informado")
-    local   = getattr(analise_or_vaga, "local", None)
-    salario = getattr(analise_or_vaga, "salario", None)
+def _chip_techs(techs: list[str], max_n: int = 5) -> str:
+    """Renderiza techs como chips inline: `Python` `SQL` `Power BI`"""
+    return " ".join(f"`{t}`" for t in techs[:max_n])
 
+
+def _linha_meta(modalidade: str, local: str | None, salario: str | None) -> str:
+    """Linha compacta de metadados: 🌐 Remoto · 📍 BSB · 💵 R$8k"""
     partes = []
-    if modal and modal != "nao_informado":
-        partes.append(_MODALIDADE.get(modal, modal.capitalize()))
+    if modalidade and modalidade != "nao_informado":
+        partes.append(_MODALIDADE.get(modalidade, modalidade.capitalize()))
     if local:
         partes.append(f"📍 {local}")
     if salario:
@@ -78,95 +92,143 @@ def _linha_info(analise_or_vaga: object) -> str:
     return " · ".join(partes)
 
 
-def _fmt_vaga_direta(email: dict) -> str:
-    """
-    Bloco completo para uma vaga onde o candidato está em contato ou
-    acaba de ser abordado.
+# ─────────────────────────────────────────────────────────────────────────────
+#  FORMATADORES DE BLOCO
+# ─────────────────────────────────────────────────────────────────────────────
 
-    Exemplo de saída:
-        📅 ENTREVISTA AGENDADA
-        *Data Engineer* — Pleno
-        🏢 Empresa XYZ
-        🌐 Remoto · 📍 SP · 💵 R$8k-12k
-        🛠️ Python, Airflow, Spark
-        _Recrutadora da XYZ convida para entrevista técnica na sexta._
-        🔗 Candidatar-se
+def _fmt_urgente(email: dict) -> str:
+    """
+    Bloco detalhado para ação imediata (proposta/entrevista/avanço).
+
+    ┌─────────────────────────────────────────┐
+    │ 📅 ENTREVISTA AGENDADA                  │
+    │ *Data Engineer* — Pl  🔵 85%            │
+    │ 🏢 Empresa XYZ                          │
+    │ 🌐 Remoto · 📍 SP · 💵 R$8k-12k        │
+    │ `Python` `Spark` `Airflow`              │
+    │ _Recrutadora convida para entrevista..._ │
+    │ 🔗 Candidatar-se                        │
+    └─────────────────────────────────────────┘
     """
     a: EmailAnalise = email["analise"]
+    senior  = _SENIORIDADE.get(a.senioridade, "")
+    badge   = _MATCH_EMOJI.get(a.match_label, "")
+    cargo   = a.cargo or email.get("subject", "")[:50] or "Cargo não informado"
+    meta    = _linha_meta(a.modalidade, a.local, a.salario)
 
-    cargo    = a.cargo or email.get("subject", "")[:50] or "Cargo não informado"
-    senior   = _SENIORIDADE.get(a.senioridade, "")
-    empresa  = a.empresa
-    techs    = a.techs_match[:5]
-    info     = _linha_info(a)
-    header   = _STATUS_HEADER.get(a.status, "📩 Email de recrutamento")
-
-    linhas = [header]
-    linhas.append(f"*{cargo}*" + (f" — {senior}" if senior else ""))
-    if empresa:
-        linhas.append(f"🏢 {empresa}")
-    if info:
-        linhas.append(info)
-    if techs:
-        linhas.append(f"🛠️ {', '.join(techs)}")
-    if a.resumo:
-        linhas.append(f"_{a.resumo}_")
-    if a.link:
-        linhas.append(f"🔗 [Candidatar-se]({a.link})")
+    linhas = [
+        _STATUS_HEADER.get(a.status, "📩"),
+        f"*{cargo}*" + (f" — {senior}" if senior else "") + f"  {badge} {a.match_score}%",
+    ]
+    if a.empresa:     linhas.append(f"🏢 {a.empresa}")
+    if meta:          linhas.append(meta)
+    if a.techs_match: linhas.append(_chip_techs(a.techs_match))
+    if a.resumo:      linhas.append(f"_{a.resumo}_")
+    if a.link_candidatura:
+        linhas.append(f"🔗 [Candidatar-se]({a.link_candidatura})")
 
     return "\n".join(linhas)
 
 
-def _fmt_vaga_potencial(vaga: VagaPotencial, idx: int) -> str:
+def _fmt_direct_match(email: dict) -> str:
     """
-    Item numerado de uma lista de vagas potenciais extraídas de newsletters.
+    Item compacto de "Direct Match" — uma linha principal + techs + link.
 
-    Exemplo de saída:
-        *1. Analista de BI* — Pleno
-           🏢 Empresa ABC  |  🌐 Remoto  |  🛠️ Power BI, SQL
-           🔗 Candidatar-se
+    ✅ *Analista de Dados* — Pl  🟢 90%
+       🏢 Empresa · 🌐 Remoto · 💵 R$6k
+       `SQL` `Power BI` `Python`
+       🔗 Candidatar-se
     """
-    cargo   = vaga.cargo or "Cargo não informado"
-    senior  = _SENIORIDADE.get(vaga.senioridade, "")
-    techs   = vaga.techs_match[:4]
-    info    = _linha_info(vaga)
+    a: EmailAnalise = email["analise"]
+    senior = _SENIORIDADE.get(a.senioridade, "")
+    badge  = _MATCH_EMOJI.get(a.match_label, "")
+    cargo  = a.cargo or email.get("subject", "")[:45] or "Cargo não informado"
+    meta   = _linha_meta(a.modalidade, a.local, a.salario)
 
-    linhas = [f"*{idx}. {cargo}*" + (f" — {senior}" if senior else "")]
-    partes_linha2 = []
-    if vaga.empresa:
-        partes_linha2.append(f"🏢 {vaga.empresa}")
-    if info:
-        partes_linha2.append(info)
-    if partes_linha2:
-        linhas.append("   " + "  |  ".join(partes_linha2))
-    if techs:
-        linhas.append(f"   🛠️ {', '.join(techs)}")
-    if vaga.link:
-        linhas.append(f"   🔗 [Candidatar-se]({vaga.link})")
+    # Linha 1 — cargo + score
+    linha1 = f"✅ *{cargo}*" + (f" — {senior}" if senior else "") + f"  {badge} {a.match_score}%"
 
-    return "\n".join(linhas)
+    # Linha 2 — empresa + meta
+    partes_meta = []
+    if a.empresa: partes_meta.append(f"🏢 {a.empresa}")
+    if meta:      partes_meta.append(meta)
+    linha2 = "   " + "  ·  ".join(partes_meta) if partes_meta else ""
+
+    # Linha 3 — techs
+    linha3 = "   " + _chip_techs(a.techs_match) if a.techs_match else ""
+
+    # Linha 4 — link
+    linha4 = f"   🔗 [Candidatar-se]({a.link_candidatura})" if a.link_candidatura else ""
+
+    return "\n".join(l for l in [linha1, linha2, linha3, linha4] if l)
 
 
-def _fmt_categoria_compacta(emails: list[dict], categoria: str) -> str:
+def _fmt_radar_item(email: dict) -> str:
     """
-    Bloco resumido para categorias não-vagas (treinamento, financeiro, etc.).
-    Exibe até 5 emails; trunca o restante.
+    Item de uma linha para o bloco Radar (vagas relacionadas, fora do perfil principal).
+
+    ⚠️ Analista de Dados @ Randstad | SP | `SQL`
     """
-    icon  = _CAT_ICON.get(categoria, "📌")
-    label = categoria.capitalize()
-    linhas = [f"{icon} *{label}* ({len(emails)})"]
+    a: EmailAnalise = email["analise"]
+    badge   = _MATCH_EMOJI.get(a.match_label, "🔴")
+    cargo   = a.cargo or email.get("subject", "")[:40] or "Cargo não informado"
+    empresa = f" @ {a.empresa}" if a.empresa else ""
+    local   = f" | {a.local}" if a.local else ""
+    techs   = (" | " + _chip_techs(a.techs_match, 3)) if a.techs_match else ""
 
-    for e in emails[:5]:
-        remetente = e.get("sender", "").split("<")[0].strip()[:28]
-        assunto   = e.get("subject", "(sem assunto)")[:55]
-        linhas.append(f"  • {assunto}")
-        if remetente:
-            linhas.append(f"    _{remetente}_")
+    return f"{badge} {cargo}{empresa}{local}{techs}"
 
-    if len(emails) > 5:
-        linhas.append(f"  _... e mais {len(emails) - 5}_")
 
-    return "\n".join(linhas)
+def _fmt_vaga_potencial_item(vaga: VagaPotencial, idx: int) -> str:
+    """
+    Item de vaga potencial extraída de digest/newsletter.
+
+    🟢 *1. Analista de BI* — Pl
+       🏢 Empresa · 🌐 Remoto · `Power BI` `SQL`
+       🔗 Candidatar-se
+    """
+    badge  = _MATCH_EMOJI.get(vaga.match_label, "")
+    senior = _SENIORIDADE.get(vaga.senioridade, "")
+    cargo  = vaga.cargo or "Cargo não informado"
+    meta   = _linha_meta(vaga.modalidade, vaga.local, vaga.salario)
+
+    linha1 = f"{badge} *{idx}. {cargo}*" + (f" — {senior}" if senior else "") + f"  {vaga.match_score}%"
+
+    partes_meta = []
+    if vaga.empresa: partes_meta.append(f"🏢 {vaga.empresa}")
+    if meta:         partes_meta.append(meta)
+    linha2 = "   " + "  ·  ".join(partes_meta) if partes_meta else ""
+
+    linha3 = "   " + _chip_techs(vaga.techs_match) if vaga.techs_match else ""
+    linha4 = f"   🔗 [Candidatar-se]({vaga.link_candidatura})" if vaga.link_candidatura else ""
+
+    return "\n".join(l for l in [linha1, linha2, linha3, linha4] if l)
+
+
+def _fmt_conteudo(classified: dict) -> str:
+    """
+    Bloco compacto para e-mails que não são vagas:
+    treinamento, workshops, newsletters, financeiro, outros.
+    """
+    ordem = ["treinamento", "workshops", "newsletters", "financeiro", "outros"]
+    partes: list[str] = []
+
+    for cat in ordem:
+        emails = classified.get(cat, [])
+        if not emails:
+            continue
+        icon  = _CAT_ICON.get(cat, "📌")
+        label = cat.capitalize()
+        linhas = [f"{icon} *{label}* ({len(emails)})"]
+        for e in emails[:4]:
+            remetente = e.get("sender", "").split("<")[0].strip()[:25]
+            assunto   = e.get("subject", "(sem assunto)")[:50]
+            linhas.append(f"  • {assunto}" + (f"  _({remetente})_" if remetente else ""))
+        if len(emails) > 4:
+            linhas.append(f"  _... e mais {len(emails) - 4}_")
+        partes.append("\n".join(linhas))
+
+    return "\n\n".join(partes)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -175,95 +237,86 @@ def _fmt_categoria_compacta(emails: list[dict], categoria: str) -> str:
 
 def _build_messages(classified: dict) -> list[str]:
     """
-    Retorna lista de strings prontas para envio.
-    Cada string respeita o limite de 4096 chars do Telegram.
-    A ordem reflete a prioridade de ação do candidato.
+    Retorna lista de strings prontas para envio no Telegram.
+    Cada string respeita os 4096 chars do Telegram.
     """
     vagas: list[dict] = classified.get("vagas", [])
+    msgs: list[str] = []
 
-    # Segmenta as vagas por urgência
-    urgentes      = [v for v in vagas if v["analise"].status in _STATUS_URGENTES]
-    novas_vagas   = [v for v in vagas
-                     if v["analise"].relevante_para_perfil
-                     and v["analise"].status == "nova_vaga"]
-    pot_emails    = [v for v in vagas if v["analise"].status == "vaga_potencial"]
-    outros_vagas  = [v for v in vagas
-                     if v not in urgentes
-                     and v not in novas_vagas
-                     and v not in pot_emails]
+    # Segmenta vagas
+    urgentes       = [v for v in vagas if v["analise"].status in _STATUS_URGENTES]
+    direct_match   = [v for v in vagas
+                      if v["analise"].match_score >= MATCH_THRESHOLD_PCT
+                      and v["analise"].status not in _STATUS_URGENTES
+                      and v["analise"].status != "vaga_potencial"]
+    pot_emails     = [v for v in vagas if v["analise"].status == "vaga_potencial"]
+    radar          = [v for v in vagas
+                      if v["analise"].match_score < MATCH_THRESHOLD_PCT
+                      and v["analise"].status not in _STATUS_URGENTES
+                      and v["analise"].status != "vaga_potencial"]
 
-    # Coleta vagas potenciais relevantes de todos os digests
-    vagas_potenciais_relevantes: list[VagaPotencial] = [
-        vp
-        for email in pot_emails
-        for vp in email["analise"].vagas_potenciais
-        if vp.relevante
-    ]
-
-    total    = sum(len(v) for v in classified.values())
-    n_vagas  = len(vagas)
-    n_pot    = len(vagas_potenciais_relevantes)
-    data     = datetime.now().strftime("%d/%m/%Y %H:%M")
-
-    messages: list[str] = []
-
-    # ── MSG 1: cabeçalho + ação urgente ──────────────────────────────────────
-    bloco1 = (
-        f"📬 *Digest — {data}*\n"
-        f"_{total} emails · {n_vagas} vagas · {n_pot} para se inscrever_"
+    # Vagas potenciais relevantes extraídas de todos os digests
+    pot_relevantes: list[VagaPotencial] = sorted(
+        [vp for e in pot_emails
+             for vp in e["analise"].vagas_potenciais
+             if vp.match_score >= MATCH_THRESHOLD_PCT],
+        key=lambda v: -v.match_score,
     )
 
+    total   = sum(len(lst) for lst in classified.values())
+    n_vagas = len(vagas)
+    n_pot   = len(pot_relevantes)
+    data    = datetime.now().strftime("%d/%m %H:%M")
+
+    # ── MSG 1: cabeçalho + urgente ────────────────────────────────────────────
+    cab = (
+        f"📬 *Digest de E-mails — {data}*\n"
+        f"_{total} emails · {n_vagas} vagas · {n_pot} para se inscrever_\n\n"
+        f"🟢 ≥80%  🔵 ≥60%  🟡 ≥40%  🔴 <40%"
+    )
     if urgentes:
-        bloco1 += "\n\n━━ 🚨 *AÇÃO NECESSÁRIA* ━━\n"
-        for email in urgentes:
-            bloco1 += "\n" + _fmt_vaga_direta(email) + "\n"
+        cab += "\n\n━━━━━━━━━━━━━━━━━━━━\n🚨 *AÇÃO NECESSÁRIA*\n━━━━━━━━━━━━━━━━━━━━\n"
+        for e in urgentes:
+            cab += "\n" + _fmt_urgente(e) + "\n"
+    msgs.append(cab.strip())
 
-    if bloco1.strip():
-        messages.append(bloco1.strip())
+    # ── MSG 2: Direct Match ───────────────────────────────────────────────────
+    if direct_match or pot_relevantes:
+        bloco = "━━━━━━━━━━━━━━━━━━━━\n✅ *DIRECT MATCH*\n━━━━━━━━━━━━━━━━━━━━\n"
 
-    # ── MSG 2: vagas diretas relevantes ao perfil ─────────────────────────────
-    if novas_vagas:
-        bloco2 = "━━ 💼 *Vagas do seu perfil* ━━\n"
-        for email in novas_vagas:
-            bloco2 += "\n" + _fmt_vaga_direta(email) + "\n"
-        messages.append(bloco2.strip())
+        if direct_match:
+            for e in direct_match:
+                bloco += "\n" + _fmt_direct_match(e) + "\n"
 
-    # ── MSG 3: vagas potenciais para se inscrever ─────────────────────────────
-    if vagas_potenciais_relevantes:
-        bloco3 = (
-            f"━━ 👀 *Vagas para se inscrever* ━━\n"
-            f"_Encontradas em {len(pot_emails)} email(s)_\n"
+        if pot_relevantes:
+            bloco += f"\n📌 *Vagas para se inscrever* — extraídas de {len(pot_emails)} digest(s)\n"
+            for i, vp in enumerate(pot_relevantes[:10], 1):
+                bloco += "\n" + _fmt_vaga_potencial_item(vp, i) + "\n"
+            if len(pot_relevantes) > 10:
+                bloco += f"\n_... e mais {len(pot_relevantes) - 10} vagas_"
+
+        msgs.append(bloco.strip())
+
+    # ── MSG 3: Radar ──────────────────────────────────────────────────────────
+    if radar:
+        bloco = f"━━━━━━━━━━━━━━━━━━━━\n📡 *RADAR* — relacionadas, fora do perfil principal ({len(radar)})\n━━━━━━━━━━━━━━━━━━━━\n"
+        for e in radar[:12]:
+            bloco += _fmt_radar_item(e) + "\n"
+        if len(radar) > 12:
+            bloco += f"_... e mais {len(radar) - 12}_"
+        msgs.append(bloco.strip())
+
+    # ── MSG 4: Conteúdo & Networking ──────────────────────────────────────────
+    conteudo = _fmt_conteudo(classified)
+    if conteudo:
+        msgs.append(
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "📖 *CONTEÚDO & NETWORKING*\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            + conteudo
         )
-        for i, vp in enumerate(vagas_potenciais_relevantes[:12], 1):
-            bloco3 += "\n" + _fmt_vaga_potencial(vp, i) + "\n"
-        if len(vagas_potenciais_relevantes) > 12:
-            bloco3 += f"\n_... e mais {len(vagas_potenciais_relevantes) - 12} vagas_"
-        messages.append(bloco3.strip())
 
-    # ── MSG 4: outras vagas (fora do perfil) + demais categorias ─────────────
-    bloco4_partes: list[str] = []
-
-    if outros_vagas:
-        linhas = [f"📭 *Outras vagas* ({len(outros_vagas)}) — fora do perfil"]
-        for e in outros_vagas[:4]:
-            a       = e["analise"]
-            cargo   = a.cargo or e.get("subject", "")[:45]
-            empresa = f" @ {a.empresa}" if a.empresa else ""
-            linhas.append(f"  • {cargo}{empresa}")
-        if len(outros_vagas) > 4:
-            linhas.append(f"  _... e mais {len(outros_vagas) - 4}_")
-        bloco4_partes.append("\n".join(linhas))
-
-    ordem_cats = ["treinamento", "workshops", "financeiro", "newsletters", "outros"]
-    for cat in ordem_cats:
-        emails_cat = classified.get(cat, [])
-        if emails_cat:
-            bloco4_partes.append(_fmt_categoria_compacta(emails_cat, cat))
-
-    if bloco4_partes:
-        messages.append("\n\n".join(bloco4_partes))
-
-    return messages
+    return msgs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -271,15 +324,14 @@ def _build_messages(classified: dict) -> list[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _send(token: str, chat_id: str, text: str) -> None:
-    """Envia uma mensagem, quebrando em chunks se ultrapassar 4096 chars."""
+    """Envia texto, quebrando em chunks ≤4096 chars se necessário."""
     if not text.strip():
         return
 
-    chunks: list[str] = []
     if len(text) <= 4096:
         chunks = [text]
     else:
-        current = ""
+        chunks, current = [], ""
         for line in text.split("\n"):
             if len(current) + len(line) + 1 > 4000:
                 chunks.append(current)
@@ -292,21 +344,16 @@ def _send(token: str, chat_id: str, text: str) -> None:
     for chunk in chunks:
         resp = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={
-                "chat_id":    chat_id,
-                "text":       chunk,
-                "parse_mode": "Markdown",
-            },
+            json={"chat_id": chat_id, "text": chunk, "parse_mode": "Markdown"},
             timeout=10,
         )
         if not resp.ok:
-            print(f"[telegram] Erro ao enviar: {resp.status_code} {resp.text[:200]}")
+            print(f"[telegram] Erro {resp.status_code}: {resp.text[:200]}")
 
 
 def send_digest(classified: dict) -> None:
     """Ponto de entrada: monta e envia todas as mensagens do digest."""
     token   = os.environ["TELEGRAM_TOKEN"]
     chat_id = os.environ["TELEGRAM_CHAT_ID"]
-
     for msg in _build_messages(classified):
         _send(token, chat_id, msg)
