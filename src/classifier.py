@@ -1,18 +1,119 @@
-import os
+"""
+classifier.py
+─────────────────────────────────────────────────────────────────────────────
+Responsabilidade única: classificar e analisar emails via Groq.
+A formatação Telegram fica toda em telegram_sender.py.
+
+Fluxo por email:
+  1. classify_email()  → categoria via regex (fallback: LLM, 10 tokens)
+  2. analisar_vaga()   → análise estruturada via LLM → retorna EmailAnalise
+  3. classify_all()    → orquestra tudo, devolve dict[categoria → lista]
+─────────────────────────────────────────────────────────────────────────────
+"""
+
 import json
+import os
 import re
+from dataclasses import dataclass, field
+from typing import Optional
+
 from groq import Groq
 
-# ─────────────────────────────────────────────
-#  CONFIGURAÇÃO
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  CLIENTE & MODELO
+# ─────────────────────────────────────────────────────────────────────────────
 
-client = Groq(api_key=os.environ["GROQ_API_KEY"])
+client     = Groq(api_key=os.environ["GROQ_API_KEY"])
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 
-# ─────────────────────────────────────────────
-#  CATEGORIAS & KEYWORDS
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  SCHEMA DE SAÍDA  (dataclasses funcionam como contrato + documentação)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class VagaPotencial:
+    cargo:       Optional[str]
+    empresa:     Optional[str]
+    senioridade: str                    # junior | pleno | senior | nao_informado
+    modalidade:  str                    # remoto | hibrido | presencial | nao_informado
+    local:       Optional[str]
+    salario:     Optional[str]
+    techs_match: list[str]
+    link:        Optional[str]
+    relevante:   bool
+
+@dataclass
+class EmailAnalise:
+    # ── campos sempre presentes ──
+    status:               str           # ver STATUS_PRIORIDADE abaixo
+    relevante_para_perfil: bool
+    resumo:               str           # 1 frase objetiva
+
+    # ── campos de vaga direta ──
+    cargo:       Optional[str]  = None
+    empresa:     Optional[str]  = None
+    senioridade: str            = "nao_informado"
+    modalidade:  str            = "nao_informado"
+    local:       Optional[str]  = None
+    salario:     Optional[str]  = None
+    techs_match: list[str]      = field(default_factory=list)
+    link:        Optional[str]  = None
+
+    # ── lista de vagas (somente para status == vaga_potencial) ──
+    vagas_potenciais: list[VagaPotencial] = field(default_factory=list)
+
+    # ── auditoria ──
+    motivo_irrelevante: Optional[str] = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  PERFIL DO CANDIDATO
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CARGOS_ALVO = [
+    "Analista de Dados", "Engenheiro de Dados", "Data Analyst", "Data Engineer",
+    "Analista de BI", "BI Analyst", "Business Intelligence", "Analytics Engineer",
+    "Data Scientist",
+]
+_SENIORIDADES_ALVO = ["Junior", "Pleno"]
+_STACK = [
+    # Engenharia
+    "IBM DataStage", "Apache Spark", "PySpark", "Databricks", "ETL", "ELT", "Apache Airflow",
+    # Bancos
+    "IBM DB2", "MySQL", "SQL", "Modelagem Relacional", "Erwin Data Modeler",
+    # Linguagens / libs
+    "Python", "Pandas", "NumPy", "Scikit-learn", "JavaScript", "Node.js",
+    # Cloud / infra
+    "Docker", "AWS", "GCP", "Azure", "SAS",
+    # DevOps / automação
+    "Power Automate", "Git", "GitHub",
+    # Visualização
+    "Power BI", "Spotfire", "Matplotlib", "Seaborn", "Plotly",
+]
+
+# String compacta injetada no prompt (economiza tokens vs. JSON aninhado)
+PERFIL_PROMPT = (
+    f"Cargos alvo: {', '.join(_CARGOS_ALVO)}\n"
+    f"Senioridades alvo: {', '.join(_SENIORIDADES_ALVO)}\n"
+    f"Stack do candidato: {', '.join(_STACK)}"
+)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  PRIORIDADES & CATEGORIAS
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Menor número = exibir primeiro no Telegram
+STATUS_PRIORIDADE: dict[str, int] = {
+    "proposta":            0,
+    "entrevista_agendada": 1,
+    "avanco_etapa":        2,
+    "nova_vaga":           3,
+    "vaga_potencial":      4,
+    "aguardando":          5,
+    "reprovado":           6,
+    "outro":               7,
+}
 
 CATEGORIES: dict[str, list[str]] = {
     "vagas": [
@@ -31,326 +132,191 @@ CATEGORIES: dict[str, list[str]] = {
     "outros":      [],
 }
 
-# Compilar regex uma única vez na inicialização
-CATEGORY_PATTERNS: dict[str, re.Pattern] = {
+# Compilados uma vez na inicialização do módulo
+_CATEGORY_PATTERNS: dict[str, re.Pattern] = {
     cat: re.compile("|".join(re.escape(kw) for kw in kws), re.IGNORECASE)
     for cat, kws in CATEGORIES.items()
-    if kws  # ignora 'outros' que tem lista vazia
+    if kws
 }
 
-# ─────────────────────────────────────────────
-#  PERFIL DO CANDIDATO
-# ─────────────────────────────────────────────
 
-CANDIDATO = {
-    "cargos_alvo": [
-        "Analista de Dados", "Engenheiro de Dados", "Data Analyst", "Data Engineer",
-        "Analista de BI", "BI Analyst", "Business Intelligence", "Analytics Engineer",
-        "Data Scientist",
-    ],
-    "senioridades_alvo": ["Junior", "Pleno"],
-    "stack": {
-        "engenharia":      ["IBM DataStage", "Apache Spark", "PySpark", "Databricks", "ETL/ELT", "Apache Airflow", "Pipelines de Dados"],
-        "bancos":          ["IBM DB2", "MySQL", "SQL", "Modelagem Relacional", "Erwin Data Modeler"],
-        "linguagens_libs": ["Python", "Pandas", "NumPy", "PyAutoGUI", "Scikit-learn", "JavaScript", "Node.js"],
-        "cloud":           ["Databricks", "Docker", "SAS", "AWS", "GCP", "Azure"],
-        "automacao_devops":["Power Automate", "Git", "GitHub", "Scrum", "Kanban"],
-        "visualizacao":    ["Power BI", "Spotfire Analytics", "Matplotlib", "Seaborn", "Plotly"],
-    },
-}
-
-# Texto compacto do perfil para injetar nos prompts
-_STACK_FLAT = ", ".join(
-    tech for techs in CANDIDATO["stack"].values() for tech in techs
-)
-PERFIL_RESUMIDO = (
-    f"Cargos: {', '.join(CANDIDATO['cargos_alvo'])} | "
-    f"Senioridade: {', '.join(CANDIDATO['senioridades_alvo'])} | "
-    f"Stack: {_STACK_FLAT}"
-)
-
-# ─────────────────────────────────────────────
-#  CONSTANTES DE NEGÓCIO
-# ─────────────────────────────────────────────
-
-# Prioridade de exibição: menor = mais urgente
-STATUS_PRIORIDADE: dict[str, int] = {
-    "proposta":            0,
-    "entrevista_agendada": 1,
-    "avanco_etapa":        2,
-    "nova_vaga":           3,
-    "vaga_potencial":      4,
-    "aguardando":          5,
-    "reprovado":           6,
-    "outro":               7,
-}
-
-EMOJI_STATUS: dict[str, str] = {
-    "proposta":            "🏆",
-    "entrevista_agendada": "📅",
-    "avanco_etapa":        "🚀",
-    "nova_vaga":           "💼",
-    "vaga_potencial":      "📋",
-    "aguardando":          "⏳",
-    "reprovado":           "❌",
-    "outro":               "📩",
-}
-
-EMOJI_CATEGORIA: dict[str, str] = {
-    "vagas":       "💼",
-    "treinamento": "🎓",
-    "workshops":   "🛠️",
-    "newsletters": "📰",
-    "financeiro":  "💰",
-    "outros":      "📁",
-}
-
-# ─────────────────────────────────────────────
-#  CLASSIFICAÇÃO DE CATEGORIA
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  CLASSIFICAÇÃO DE CATEGORIA  (regex-first, LLM como fallback de 10 tokens)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def classify_email(subject: str, snippet: str) -> str:
-    """
-    Classifica o email por keyword matching (rápido).
-    Usa LLM como fallback apenas quando keywords não resolvem.
-    """
+    """Retorna uma das chaves de CATEGORIES para o email recebido."""
     text = f"{subject} {snippet}"
-
-    for category, pattern in CATEGORY_PATTERNS.items():
+    for cat, pattern in _CATEGORY_PATTERNS.items():
         if pattern.search(text):
-            return category
+            return cat
 
-    # Fallback via LLM
-    prompt = (
-        "Classifique este email em UMA categoria: vagas, treinamento, workshops, newsletters, financeiro, outros.\n"
-        f"Assunto: {subject}\n"
-        f"Trecho: {snippet}\n"
-        "Responda APENAS com o nome da categoria."
-    )
+    # Fallback LLM — mínimo de tokens possível
     resp = client.chat.completions.create(
         model=GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=10,
+        messages=[{
+            "role": "user",
+            "content": (
+                "Classifique em UMA palavra: vagas | treinamento | workshops | "
+                "newsletters | financeiro | outros\n"
+                f"Assunto: {subject}\nTrecho: {snippet[:200]}"
+            ),
+        }],
+        max_tokens=5,
         temperature=0,
     )
-    result = (resp.choices[0].message.content or "outros").strip().lower()
-    return result if result in CATEGORIES else "outros"
+    cat = (resp.choices[0].message.content or "outros").strip().lower()
+    return cat if cat in CATEGORIES else "outros"
 
 
-# ─────────────────────────────────────────────
-#  ANÁLISE DE VAGAS
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#  PROMPT DE ANÁLISE DE VAGA  (system + user separados = melhor aderência ao JSON)
+# ─────────────────────────────────────────────────────────────────────────────
 
-_PROMPT_ANALISE_VAGA = """Você é um assistente que analisa emails de recrutamento.
+_SYSTEM_ANALISE = """\
+Você é um parser de emails de recrutamento. Retorne SOMENTE JSON válido, sem markdown, \
+sem texto extra, sem comentários. Siga o schema fornecido à risca.\
+"""
 
+_USER_ANALISE = """\
 PERFIL DO CANDIDATO:
 {perfil}
 
 EMAIL:
-Assunto : {subject}
-Trecho  : {snippet}
-Corpo   : {body}
+Assunto: {subject}
+Trecho : {snippet}
+Corpo  : {body}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DEFINIÇÕES DE STATUS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• vaga_potencial       → newsletter/digest com lista de vagas abertas (candidato ainda não se inscreveu)
-• nova_vaga            → recrutador contatou diretamente sobre UMA vaga específica
-• entrevista_agendada  → confirmação ou convite de entrevista
-• avanco_etapa         → aprovado para próxima fase
-• proposta             → oferta formal de emprego
-• aguardando           → processo em andamento, sem novidades
-• reprovado            → candidato reprovado
-• outro                → email de recrutamento que não se encaixa nos anteriores
+STATUS POSSÍVEIS:
+proposta | entrevista_agendada | avanco_etapa | nova_vaga | vaga_potencial | aguardando | reprovado | outro
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-INSTRUÇÕES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. Extraia links diretos (http/https), URLs encurtadas (bit.ly, etc) e links Markdown [texto](url).
-2. Para "vaga_potencial", liste CADA vaga encontrada em "vagas_potenciais".
-3. Marque "relevante_para_perfil" = true somente para cargos de Dados/BI em nível Junior ou Pleno.
-4. O campo "resumo" deve ser uma frase objetiva no estilo: "Recrutador da [Empresa] oferece vaga de [Cargo] [Senioridade] [Modalidade] com foco em [techs principais]."
-5. Se não encontrar um campo, use null.
+REGRAS:
+- vaga_potencial → newsletter/digest com LISTA de vagas; preencha "vagas_potenciais"
+- nova_vaga      → recrutador contatou sobre UMA vaga específica
+- relevante_para_perfil = true SOMENTE se cargo e senioridade batem com o perfil
+- resumo: 1 frase objetiva ("Recrutador da X oferece vaga de Y Pleno Remoto em Python/SQL")
+- Extraia todos os links http/https, encurtados (bit.ly etc) e Markdown [texto](url)
+- Campos não encontrados → null  |  listas não encontradas → []
 
-Responda EXATAMENTE neste JSON (sem markdown, sem texto extra):
+JSON DE SAÍDA:
 {{
-  "cargo"                : "cargo principal ou null",
-  "empresa"              : "empresa ou null",
-  "senioridade"          : "junior | pleno | senior | nao_informado",
-  "modalidade"           : "remoto | hibrido | presencial | nao_informado",
-  "local"                : "cidade/estado ou null",
-  "salario"              : "faixa salarial ou null",
-  "techs_match"          : ["tecnologias do perfil mencionadas no email"],
-  "link"                 : "URL direta para a vaga ou null",
-  "status"               : "nova_vaga | vaga_potencial | entrevista_agendada | avanco_etapa | reprovado | proposta | aguardando | outro",
-  "vagas_potenciais"     : [
+  "status": "",
+  "relevante_para_perfil": true,
+  "resumo": "",
+  "cargo": null,
+  "empresa": null,
+  "senioridade": "nao_informado",
+  "modalidade": "nao_informado",
+  "local": null,
+  "salario": null,
+  "techs_match": [],
+  "link": null,
+  "vagas_potenciais": [
     {{
-      "cargo"      : "nome do cargo",
-      "empresa"    : "empresa ou null",
-      "senioridade": "junior | pleno | nao_informado",
-      "modalidade" : "remoto | hibrido | presencial | nao_informado",
-      "local"      : "cidade ou null",
-      "salario"    : "faixa ou null",
-      "techs_match": ["techs que batem com o perfil"],
-      "link"       : "URL direta ou null",
-      "relevante"  : true
+      "cargo": "", "empresa": null, "senioridade": "nao_informado",
+      "modalidade": "nao_informado", "local": null, "salario": null,
+      "techs_match": [], "link": null, "relevante": true
     }}
   ],
-  "resumo"               : "frase objetiva descrevendo o email",
-  "relevante_para_perfil": true,
-  "motivo_irrelevante"   : "motivo se não relevante, senão null"
-}}
-
-Preencha "vagas_potenciais" SOMENTE quando status for "vaga_potencial".
-Se não houver vagas potenciais relevantes, use [].
+  "motivo_irrelevante": null
+}}\
 """
 
-_ANALISE_FALLBACK: dict = {
-    "cargo": None, "empresa": None, "senioridade": "nao_informado",
-    "modalidade": "nao_informado", "local": None, "salario": None,
-    "techs_match": [], "link": None, "status": "outro",
-    "vagas_potenciais": [], "resumo": "",
-    "relevante_para_perfil": False, "motivo_irrelevante": None,
-}
+# Fallback quando a API falha ou retorna JSON inválido
+_FALLBACK_ANALISE = EmailAnalise(
+    status="outro",
+    relevante_para_perfil=False,
+    resumo="",
+    motivo_irrelevante="Falha ao processar via API",
+)
 
 
-def analisar_vaga(email: dict) -> dict:
-    """Envia o email para o LLM e retorna análise estruturada."""
-    prompt = _PROMPT_ANALISE_VAGA.format(
-        perfil  = PERFIL_RESUMIDO,
+def _parse_analise(raw: dict) -> EmailAnalise:
+    """Converte o dict bruto da API no dataclass EmailAnalise."""
+    potenciais = [
+        VagaPotencial(
+            cargo       = v.get("cargo"),
+            empresa     = v.get("empresa"),
+            senioridade = v.get("senioridade", "nao_informado"),
+            modalidade  = v.get("modalidade",  "nao_informado"),
+            local       = v.get("local"),
+            salario     = v.get("salario"),
+            techs_match = v.get("techs_match") or [],
+            link        = v.get("link"),
+            relevante   = bool(v.get("relevante", False)),
+        )
+        for v in (raw.get("vagas_potenciais") or [])
+    ]
+    return EmailAnalise(
+        status                = raw.get("status", "outro"),
+        relevante_para_perfil = bool(raw.get("relevante_para_perfil", False)),
+        resumo                = raw.get("resumo", ""),
+        cargo                 = raw.get("cargo"),
+        empresa               = raw.get("empresa"),
+        senioridade           = raw.get("senioridade", "nao_informado"),
+        modalidade            = raw.get("modalidade",  "nao_informado"),
+        local                 = raw.get("local"),
+        salario               = raw.get("salario"),
+        techs_match           = raw.get("techs_match") or [],
+        link                  = raw.get("link"),
+        vagas_potenciais      = potenciais,
+        motivo_irrelevante    = raw.get("motivo_irrelevante"),
+    )
+
+
+def analisar_vaga(email: dict) -> EmailAnalise:
+    """Chama o LLM e devolve um EmailAnalise tipado."""
+    user_prompt = _USER_ANALISE.format(
+        perfil  = PERFIL_PROMPT,
         subject = email.get("subject", ""),
         snippet = email.get("snippet", ""),
         body    = email.get("body", "")[:2000],
     )
     try:
         resp = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000,
-            temperature=0,
+            model    = GROQ_MODEL,
+            messages = [
+                {"role": "system", "content": _SYSTEM_ANALISE},
+                {"role": "user",   "content": user_prompt},
+            ],
+            max_tokens  = 900,   # suficiente para vaga_potencial com 10 vagas
+            temperature = 0,
         )
-        content = (resp.choices[0].message.content or "{}").strip()
-        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        analise = json.loads(content)
-        analise.setdefault("vagas_potenciais", [])
-        return analise
+        raw = (resp.choices[0].message.content or "{}").strip()
+        # Remove fences caso o modelo desobedeça o system prompt
+        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        return _parse_analise(json.loads(raw))
 
     except json.JSONDecodeError:
-        return {**_ANALISE_FALLBACK, "motivo_irrelevante": "JSON inválido retornado pela API"}
-    except Exception as e:
-        print(f"[classifier] Erro na análise: {e}")
-        return {**_ANALISE_FALLBACK, "motivo_irrelevante": f"Erro de API: {type(e).__name__}"}
+        return EmailAnalise(
+            **{**_FALLBACK_ANALISE.__dict__,
+               "motivo_irrelevante": "JSON inválido retornado pela API"}
+        )
+    except Exception as exc:
+        print(f"[classifier] Erro na análise: {exc}")
+        return EmailAnalise(
+            **{**_FALLBACK_ANALISE.__dict__,
+               "motivo_irrelevante": f"Erro de API: {type(exc).__name__}"}
+        )
 
 
-# ─────────────────────────────────────────────
-#  FORMATAÇÃO PARA TELEGRAM
-# ─────────────────────────────────────────────
-
-def _fmt_vaga(analise: dict, subject: str) -> str:
-    """Formata uma vaga individual para mensagem Telegram."""
-    status  = analise.get("status", "outro")
-    emoji   = EMOJI_STATUS.get(status, "📩")
-    cargo   = analise.get("cargo") or subject or "Cargo não informado"
-    empresa = analise.get("empresa") or "Empresa não informada"
-    senior  = analise.get("senioridade", "nao_informado").replace("nao_informado", "—")
-    modal   = analise.get("modalidade",  "nao_informado").replace("nao_informado", "—")
-    local   = analise.get("local")   or "—"
-    salario = analise.get("salario") or "—"
-    techs   = ", ".join(analise.get("techs_match") or []) or "—"
-    link    = analise.get("link")
-    resumo  = analise.get("resumo", "")
-
-    lines = [
-        f"{emoji} *{cargo}* — {empresa}",
-        f"📊 `{senior}` | 🏠 `{modal}` | 📍 {local}",
-        f"💵 {salario}",
-        f"🛠 {techs}",
-    ]
-    if resumo:
-        lines.append(f"_{resumo}_")
-    if link:
-        lines.append(f"🔗 [Acessar vaga]({link})")
-
-    return "\n".join(lines)
-
-
-def _fmt_vaga_potencial(vaga: dict) -> str:
-    """Formata um item de lista de vagas potenciais."""
-    cargo   = vaga.get("cargo") or "Cargo não informado"
-    empresa = vaga.get("empresa") or "—"
-    senior  = vaga.get("senioridade", "nao_informado").replace("nao_informado", "—")
-    modal   = vaga.get("modalidade",  "nao_informado").replace("nao_informado", "—")
-    techs   = ", ".join(vaga.get("techs_match") or []) or "—"
-    link    = vaga.get("link")
-
-    line = f"  • *{cargo}* @ {empresa} | `{senior}` | `{modal}` | 🛠 {techs}"
-    if link:
-        line += f" | [→ vaga]({link})"
-    return line
-
-
-def format_telegram_summary(classified: dict) -> str:
-    """
-    Gera o resumo completo formatado para envio via bot Telegram.
-    Ordenado por relevância e prioridade de status.
-    """
-    sections: list[str] = ["🗂 *Resumo de Emails*\n"]
-
-    # ── VAGAS (seção mais importante, detalhada) ──────────────────────────────
-    vagas = classified.get("vagas", [])
-    if vagas:
-        sections.append("━━━━━━━━━━━━━━━━━━━")
-        sections.append("💼 *VAGAS*")
-        sections.append("━━━━━━━━━━━━━━━━━━━")
-
-        for email in vagas:
-            analise = email.get("analise", {})
-            block   = _fmt_vaga(analise, email.get("subject", ""))
-
-            # Sub-lista de vagas potenciais (newsletters de emprego)
-            potenciais = [v for v in analise.get("vagas_potenciais", []) if v.get("relevante")]
-            if potenciais:
-                sub = "\n".join(_fmt_vaga_potencial(v) for v in potenciais)
-                block += f"\n\n📌 *Vagas relevantes no digest:*\n{sub}"
-
-            sections.append(block)
-            sections.append("")  # linha em branco entre vagas
-
-    # ── DEMAIS CATEGORIAS (compactas) ─────────────────────────────────────────
-    ordem_categorias = ["treinamento", "workshops", "financeiro", "newsletters", "outros"]
-
-    for cat in ordem_categorias:
-        emails = classified.get(cat, [])
-        if not emails:
-            continue
-
-        emoji = EMOJI_CATEGORIA.get(cat, "📁")
-        label = cat.upper()
-        sections.append(f"{emoji} *{label}* ({len(emails)})")
-
-        for email in emails:
-            subj = email.get("subject", "(sem assunto)")
-            snip = email.get("snippet", "")[:80]
-            sections.append(f"  • {subj}" + (f"\n    _{snip}_" if snip else ""))
-
-        sections.append("")
-
-    return "\n".join(sections).strip()
-
-
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 #  PIPELINE PRINCIPAL
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
 
-def classify_all(emails: list[dict]) -> dict[str, list]:
+def classify_all(emails: list[dict]) -> dict[str, list[dict]]:
     """
-    Classifica todos os emails, analisa vagas e retorna dict por categoria.
-    As vagas são ordenadas por: relevância → prioridade de status.
+    Classifica e analisa todos os emails.
+
+    Retorna:
+        dict  categoria → lista de emails
+              Cada email de 'vagas' ganha a chave 'analise': EmailAnalise
+              As vagas são ordenadas por: relevância → prioridade de status
     """
     result: dict[str, list] = {cat: [] for cat in CATEGORIES}
 
     for email in emails:
-        cat = classify_email(email["subject"], email["snippet"])
+        cat = classify_email(email.get("subject", ""), email.get("snippet", ""))
         if cat not in result:
             cat = "outros"
 
@@ -359,10 +325,11 @@ def classify_all(emails: list[dict]) -> dict[str, list]:
 
         result[cat].append(email)
 
-    # Ordenar vagas: relevantes primeiro, depois por status
     result["vagas"].sort(key=lambda e: (
-        0 if e.get("analise", {}).get("relevante_para_perfil") else 1,
-        STATUS_PRIORIDADE.get(e.get("analise", {}).get("status", "outro"), 7),
+        0 if e.get("analise") and e["analise"].relevante_para_perfil else 1,
+        STATUS_PRIORIDADE.get(
+            e["analise"].status if e.get("analise") else "outro", 7
+        ),
     ))
 
     return result
