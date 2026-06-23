@@ -3,8 +3,10 @@
 venv/
 env/
 ENV/
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.egg-info/
 dist/
@@ -21,18 +23,19 @@ build/
 .DS_Store
 Thumbs.db
 
-# Credentials and tokens (never commit these!)
+# Credentials and tokens
+.env
+.env.local
+.env.*.local
 token.json
 credentials.json
 *.pem
 *.key
 
-# Cache
+# Runtime cache
 processed_emails.json
 .cache/
 *.cache
 
-# Environment variables
-.env
-.env.local
-.env.*.local
+# Jupyter
+.ipynb_checkpoints/

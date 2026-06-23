@@ -1,395 +1,111 @@
-# Email Organizer 📧
+# Email Organizer
 
-Um sistema inteligente de classificação e organização de emails que automatiza a análise de mensagens recebidas e envia um resumo personalizado via Telegram.
+Automacao em Python que le emails do Gmail, classifica mensagens com IA e envia um resumo estruturado via Telegram. O projeto foi criado para reduzir triagem manual de caixa de entrada e monitorar mensagens relevantes, especialmente vagas, treinamentos, eventos, newsletters e alertas financeiros.
 
-## 🎯 O que faz
+## Visao Geral
 
-- **Lê emails** do Gmail com filtro automático (últimas 24h, não lidos)
-- **Classifica** emails em categorias usando IA (Groq/Llama)
-- **Remove duplicatas** com cache inteligente (7 dias)
-- **Envia resumo** formatado via Telegram com emojis e informações estruturadas
-- **Executa periodicamente** via GitHub Actions (a cada 6 horas)
+O fluxo combina Gmail API, regras de classificacao, Groq/Llama, cache de deduplicacao e GitHub Actions. A cada execucao, os emails recentes sao coletados, analisados, categorizados e enviados em formato de digest.
 
-Ideal para categorizar e monitorar:
-- 💼 **Vagas** de emprego (com status: entrevista agendada, proposta, etc)
-- 📚 **Treinamentos** e cursos
-- 🎯 **Workshops** e eventos
-- 📰 **Newsletters**
-- 💰 **Notificações financeiras**
+## Resultado
 
-## ⚡ Funcionalidades
+- Leitura automatizada de emails recentes e nao lidos.
+- Classificacao por categoria e status.
+- Extracao de informacoes relevantes de vagas, como empresa, cargo, senioridade, modalidade, salario e tecnologias.
+- Deduplicacao com cache temporario para evitar mensagens repetidas.
+- Envio de resumo formatado para Telegram.
+- Execucao recorrente via GitHub Actions.
 
-### Classificação Inteligente
-- Detecta categoria automaticamente (vagas, treinamento, workshops, newsletters, financeiro, outros)
-- Extrai informações relevantes de vagas (empresa, cargo, senioridade, modalidade, salário, tecnologias)
-- Identifica status de processos seletivos (nova vaga, entrevista agendada, proposta, reprovado, etc)
-- Filtra por perfil do candidato (tecnologias, cargo, senioridade)
+## Arquitetura
 
-### Deduplicação
-- Cache com hash MD5 do email (subject + sender + snippet)
-- Retém histórico de 7 dias
-- Evita reprocessar emails duplicados
-
-### Envio via Telegram
-- Formatação elegante com Markdown e emojis
-- Agrupamento por categoria
-- Links diretos para candidaturas
-
-## 📋 Pré-requisitos
-
-- Python 3.11+
-- Conta Google com Gmail ativado
-- Token da API Groq (IA)
-- Token do Telegram Bot
-- Acesso a GitHub Actions (para automation)
-
-## 🚀 Instalação Local
-
-### 1. Clone o repositório
-
-```bash
-git clone https://github.com/seu-usuario/email-organizer.git
-cd email-organizer
+```text
+Gmail API -> gmail_reader.py -> main.py -> classifier.py -> Groq/Llama
+                                             \-> telegram_sender.py -> Telegram
+                                             \-> processed_emails.json
 ```
 
-### 2. Crie um ambiente virtual
+## Stack
+
+- Python 3.11+
+- Gmail API
+- OAuth2
+- Groq API / Llama
+- Telegram Bot API
+- GitHub Actions
+- JSON
+- Automacao
+
+## Estrutura
+
+```text
+email-organizer/
+├── .github/workflows/daily_digest.yml
+├── src/
+│   ├── main.py
+│   ├── gmail_reader.py
+│   ├── classifier.py
+│   └── telegram_sender.py
+├── auth_interactive.py
+├── HOW_IT_WORKS.md
+├── requirements.txt
+└── README.md
+```
+
+## Como Executar Localmente
 
 ```bash
 python -m venv .venv
-
-# Windows
 .venv\Scripts\activate
-
-# macOS/Linux
-source .venv/bin/activate
-```
-
-### 3. Instale as dependências
-
-```bash
 pip install -r requirements.txt
-```
-
-## ⚙️ Configuração
-
-### 1. Google Gmail (OAuth2)
-
-O projeto usa autenticação OAuth2 interativa. Execute:
-
-```bash
 python auth_interactive.py
+python src/main.py
 ```
 
-Isto vai:
-1. Abrir uma URL no navegador
-2. Você faz login na sua conta Google
-3. Autoriza o acesso ao Gmail
-4. Retorna um JSON com o token
-
-**Salve o JSON resultante** - você vai usar em:
-- `token.json` (localmente)
-- `GMAIL_TOKEN` secret (GitHub)
-
-Para uso estável em GitHub Actions, extraia também:
-- `client_id`
-- `client_secret`
-- `refresh_token`
-
-E configure como secrets separados (veja seção de Deploy).
-
-### 2. API Groq (IA)
-
-1. Acesse [console.groq.com](https://console.groq.com)
-2. Gere uma API Key
-3. Configure a variável de ambiente:
-   ```bash
-   set GROQ_API_KEY=sua_chave_aqui
-   ```
-
-### 3. Telegram Bot
-
-1. Converse com [@BotFather](https://t.me/botfather) no Telegram
-2. Crie um novo bot: `/newbot`
-3. Anote o **token**
-4. Descubra seu **chat ID**:
-   - Envie qualquer mensagem para o bot
-   - Acesse: `https://api.telegram.org/bot<TOKEN>/getUpdates`
-   - Procure por `"id"` no JSON
-
-## 🏃 Como usar
-
-### Execução local
+No Linux/macOS:
 
 ```bash
-cd src
-python main.py
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python auth_interactive.py
+python src/main.py
 ```
 
-Saída esperada:
-```
-Lendo emails...
-X emails encontrados.
-Processando Y emails novos...
-Classificando...
-Enviando para o Telegram...
-Digest enviado com sucesso!
-```
+## Variaveis e Secrets
 
-### Variáveis de ambiente necessárias
+Configure localmente ou no GitHub Actions:
 
-```bash
-# Gmail
-set GMAIL_TOKEN={"token": "...", "client_id": "...", ...}
-
-# IA
-set GROQ_API_KEY=gsk_...
-set GROQ_MODEL=llama-3.1-8b-instant  # opcional
-
-# Telegram
-set TELEGRAM_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-set TELEGRAM_CHAT_ID=987654321
+```env
+GMAIL_TOKEN=...
+GMAIL_CLIENT_ID=...
+GMAIL_CLIENT_SECRET=...
+GMAIL_REFRESH_TOKEN=...
+GROQ_API_KEY=...
+GROQ_MODEL=llama-3.1-8b-instant
+TELEGRAM_TOKEN=...
+TELEGRAM_CHAT_ID=...
 ```
 
-## 🔄 Automação com GitHub Actions
+## GitHub Actions
 
-O workflow `.github/workflows/daily_digest.yml` executa automaticamente a cada 6 horas.
+O workflow `.github/workflows/daily_digest.yml` executa o digest periodicamente. Para rodar manualmente:
 
-### Configurar Secrets
+1. Acesse a aba `Actions`.
+2. Selecione o workflow de digest.
+3. Clique em `Run workflow`.
 
-No repositório, acesse **Settings → Secrets and variables → Actions** e adicione:
+## Detalhes Tecnicos
 
-| Secret | Valor |
-|--------|-------|
-| `GMAIL_TOKEN` | JSON completo do token Google |
-| `GMAIL_CLIENT_ID` | client_id do credentials.json |
-| `GMAIL_CLIENT_SECRET` | client_secret do credentials.json |
-| `GMAIL_REFRESH_TOKEN` | refresh_token do credentials.json |
-| `GROQ_API_KEY` | Chave da API Groq |
-| `TELEGRAM_TOKEN` | Token do bot Telegram |
-| `TELEGRAM_CHAT_ID` | ID do seu chat no Telegram |
+A explicacao completa do fluxo, camadas e dependencias entre modulos esta em [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
 
-### Executar manualmente
+## Cuidados de Seguranca
 
-No GitHub, vá para **Actions → Email Digest Diário → Run workflow**
+- Nunca commitar `token.json`, `credentials.json`, `.env` ou chaves de API.
+- Revogar tokens caso algum segredo tenha sido exposto.
+- Manter `processed_emails.json` fora do Git, pois pode conter metadados de mensagens.
 
-## 📁 Estrutura do Projeto
+## Proximos Passos
 
-```
-email-organizer/
-├── .github/
-│   └── workflows/
-│       └── daily_digest.yml          # GitHub Actions automation
-├── src/
-│   ├── main.py                        # Orquestrador principal
-│   ├── gmail_reader.py                # Lê emails do Gmail
-│   ├── classifier.py                  # Classifica e analisa com IA
-│   └── telegram_sender.py             # Envia digest ao Telegram
-├── auth_interactive.py                # Gera token OAuth2
-├── requirements.txt                   # Dependências Python
-├── .gitignore                         # Arquivos ignorados (token, venv)
-└── README.md                          # Este arquivo
-```
-
-### Arquivos de configuração
-
-- `credentials.json` - Credenciais do Google Cloud (não commitado)
-- `token.json` - Token OAuth2 gerado (não commitado)
-- `processed_emails.json` - Cache de emails processados (gerado em runtime)
-
-## 🔧 Stack Tecnológico
-
-- **Python 3.11+** - Linguagem principal
-- **Gmail API** - Acesso aos emails
-- **Groq API** - Classificação com IA (Llama 3.1)
-- **python-telegram-bot** - Integração Telegram
-- **GitHub Actions** - Automação e CI/CD
-### Mapa de Dependências Entre Módulos
-
-```mermaid
-graph TB
-    Main["main.py<br/>🎯 Orquestrador"]
-    
-    Main -->|import| Reader["gmail_reader.py<br/>📧 Email Reader"]
-    Main -->|import| Classifier["classifier.py<br/>🤖 Classifier"]
-    Main -->|import| Sender["telegram_sender.py<br/>📱 Telegram Sender"]
-    
-    Reader -->|uses| GAuth["google.oauth2.credentials<br/>🔐 Google Auth"]
-    Reader -->|uses| GAPI["googleapiclient.discovery<br/>📧 Gmail API"]
-    
-    Classifier -->|uses| Groq["groq.Groq<br/>🧠 Groq Client"]
-    Classifier -->|uses| Re["re (regex)<br/>🔤 Pattern Matching"]
-    Classifier -->|uses| JSON["json<br/>📋 JSON Parse"]
-    
-    Sender -->|uses| TBot["telegram.bot<br/>💬 Telegram Client"]
-    Sender -->|uses| JSON
-    
-    Main -->|uses| OS["os<br/>🌍 Environment"]
-    Main -->|uses| JSON
-    Main -->|uses| DateTime["datetime<br/>⏰ Date/Time"]
-    Main -->|uses| HashLib["hashlib<br/>🔒 MD5 Hash"]
-    
-    style Main fill:#4CAF50,color:#fff,stroke:#2E7D32,stroke-width:3px
-    style Reader fill:#2196F3,color:#fff,stroke:#1565C0,stroke-width:2px
-    style Classifier fill:#FF9800,color:#fff,stroke:#E65100,stroke-width:2px
-    style Sender fill:#9C27B0,color:#fff,stroke:#6A1B9A,stroke-width:2px
-```
-
-**Legenda:**
-- 🟢 `main.py` - Orquestrador central (verde)
-- 🔵 `gmail_reader.py` - Leitor de emails (azul)
-- 🟠 `classifier.py` - Classificador com IA (laranja)
-- 🟣 `telegram_sender.py` - Enviador (roxo)
-## � Arquitetura do Projeto
-
-### Arquitetura em Camadas
-
-```
-┌─────────────────────────────────────────────────┐
-│           CAMADA DE APRESENTAÇÃO                │
-│         📱 Telegram (usuário final)             │
-└─────────────────────────────────────────────────┘
-                        ↑
-                        │ send_digest()
-                        ↓
-┌─────────────────────────────────────────────────┐
-│        CAMADA DE FORMATAÇÃO                     │
-│    telegram_sender.py (formata + envia)         │
-└─────────────────────────────────────────────────┘
-                        ↑
-                        │ classified[]
-                        ↓
-┌─────────────────────────────────────────────────┐
-│        CAMADA DE LÓGICA/NEGÓCIO                 │
-│   main.py (orquestra todo o fluxo)              │
-│   - Deduplicação                                │
-│   - Cache management                            │
-└─────────────────────────────────────────────────┘
-                        ↑
-                        │ emails_novos[]
-                        ↓
-┌─────────────────────────────────────────────────┐
-│        CAMADA DE ANÁLISE (IA)                   │
-│  classifier.py (categoriza + analisa)           │
-│   - Keywords matching                           │
-│   - Groq API calls                              │
-└─────────────────────────────────────────────────┘
-                        ↑
-                        │ emails[]
-                        ↓
-┌─────────────────────────────────────────────────┐
-│        CAMADA DE INTEGRAÇÃO                     │
-│  gmail_reader.py (acessa APIs externas)         │
-│   - Google OAuth2                               │
-│   - Gmail API v1                                │
-└─────────────────────────────────────────────────┘
-                        ↑
-                        │
-                        ↓
-┌─────────────────────────────────────────────────┐
-│        SERVIÇOS EXTERNOS                        │
-│   🔵 Gmail  |  🤖 Groq/Llama  |  📨 Telegram   │
-└─────────────────────────────────────────────────┘
-```
-
-### Fluxo de Dados
-
-Gmail → Email Reader → Main Orchestrator → Classifier → Groq IA → Telegram Sender → Seu Telegram
-
-**Cada etapa:**
-1. **Gmail Reader** - Conecta via OAuth2, filtra últimas 24h, extrai headers e body
-2. **Main Orchestrator** - Carrega cache, remove duplicatas (hash MD5), orquestra fluxo
-3. **Classifier** - Detecta categoria por keywords, chama Groq para análise detalhada
-4. **Telegram Sender** - Formata com Markdown e emojis, agrupa por categoria
-5. **Cache** - Atualizado com novos hashes, limpeza automática após 7 dias
-
-### Estrutura de Arquivos
-
-```
-email-organizer/
-├── .github/workflows/daily_digest.yml    # CI/CD a cada 6h
-├── src/
-│   ├── main.py                           # ⚙️ Orquestrador
-│   ├── gmail_reader.py                   # 📧 Gmail
-│   ├── classifier.py                     # 🤖 IA
-│   └── telegram_sender.py                # 📱 Notificações
-├── auth_interactive.py                   # Setup OAuth2
-└── processed_emails.json                 # Cache (gerado)
-```
-
-### Fluxo de Processamento de Email
-
-```
-Email recebido
-    ↓
-gmail_reader.py → Extrai subject, sender, body
-    ↓
-main.py → Verifica cache (é duplicata?)
-    ↓
-SIM: Ignora | NÃO: Continua
-    ↓
-classifier.py → Testa keywords (qual categoria?)
-    ↓
-classifier.py → Chama Groq com prompt da IA
-    ↓
-Groq retorna: categoria, status, relevância, cargo, empresa, techs
-    ↓
-telegram_sender.py → Formata e envia ao Telegram
-    ↓
-main.py → Salva hash no cache
-```
-
-Para mais detalhes técnicos, consulte [HOW_IT_WORKS.md](HOW_IT_WORKS.md).
-
-## �🛠️ Desenvolvimento
-
-### Adicionar nova categoria
-
-Edite `src/classifier.py` e atualize:
-
-1. `CATEGORIES` - Adicione palavras-chave
-2. `CANDIDATO` (se relevante) - Adicione skills/cargos alvo
-3. Lógica de análise conforme necessário
-
-### Customizar análise
-
-A classificação acontece em `classifier.py`. Modifique:
-- Prompts enviados à IA
-- Parsing de respostas
-- Status e emojis
-
-### Filtrar emails por tipo
-
-Em `src/main.py`, ajuste o filtro Gmail:
-```python
-result = service.users().messages().list(
-    userId='me', q=f'after:{since} is:unread'
-).execute()
-```
-
-## 📝 Logs e Debugging
-
-Os logs são impressos no console/Actions. Para mais detalhes:
-
-```bash
-# Local
-python -u src/main.py
-
-# GitHub Actions
-Veja a aba "Run workflow" para cada execução
-```
-
-## 📄 Licença
-
-MIT License - sinta-se livre para usar, modificar e distribuir
-
-## 🤝 Contribuições
-
-Contribuições são bem-vindas! Abra uma issue ou pull request com suas melhorias.
-
-## 📞 Suporte
-
-- Dúvidas? Abra uma [issue](https://github.com/seu-usuario/email-organizer/issues)
-- Documentação de APIs:
-  - [Gmail API](https://developers.google.com/gmail/api)
-  - [Groq API](https://groq.com)
-  - [Telegram Bot API](https://core.telegram.org/bots/api)
+- Adicionar testes unitarios para classificacao.
+- Criar logs estruturados.
+- Separar prompts da IA em arquivos de configuracao.
+- Adicionar exemplos anonimizados de entrada e saida.
